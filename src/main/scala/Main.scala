@@ -1,21 +1,30 @@
 import java.io.File
 import java.text.SimpleDateFormat
-import java.time.format.{DateTimeFormatterBuilder, DateTimeFormatter}
-import java.time.{ZoneOffset, LocalDateTime}
-import java.util.{GregorianCalendar, Date}
+import java.util.Date
+
 import com.github.tototoshi.csv.CSVWriter
 import spray.json._
-import DefaultJsonProtocol._ // if you don't supply your own Protocol (see below)
+
+import scala.language.implicitConversions
 
 /**
- * Created by marcello on 21/04/15.
+ * Created by Marcello Steiner on 21/04/15.
  */
 object Main {
 
-  val CSV_HEADER = List("Key", "Priority",  "Estimated Time (h)", "Effective Time(h)", "Opened on", "Updated on", "Closed on", "Description")
+  val ERROR_CELL = "####"
+  val CSV_HEADER = List("Key", "Priority", "Estimated Time (h)", "Effective Time(h)", "Opened on", "Updated on", "Closed on", "Description")
   val dataFormatter = new SimpleDateFormat("yyyy-MM-DD'T'HH:mm:ss'.000'Z")
+  val excelCompatibleDateFormat = new SimpleDateFormat("yyyy-MM-DD HH:mm:ss")
 
 
+  implicit def toProperDateString(maybeDate: Option[Date]): String = {
+    maybeDate.fold(ERROR_CELL)(date => excelCompatibleDateFormat.format(date))
+  }
+
+  implicit def toStringIfDefined(maybeString: Option[String]): String = {
+    maybeString.getOrElse(ERROR_CELL)
+  }
 
 
   def main(args: Array[String]) {
@@ -32,38 +41,60 @@ object Main {
     csvWriter.close()
   }
 
-  def writeToCSV(writer: CSVWriter, issueElements: Map[String, JsValue]): Unit = {
-
-    val innerFields = issueElements("fields").asJsObject.fields
-
-    val key = issueElements("key").asInstanceOf[JsString].value
-    val priority = innerFields("priority").asJsObject().fields("name").asInstanceOf[JsString].value
-    val timeEstimate = innerFields("timeestimate") match {
-      case JsNumber(v) => (v.intValue()/3600).toString
-      case JsNull      => "-"
+  def getString(fieldName: String, fields: Map[String, JsValue]): Option[String] = {
+    fields.get(fieldName).flatMap {
+      case JsString(s) => Option(s)
+      case JsNull => None
+      case _ => throw new IllegalArgumentException("Not supposed to end up here")
     }
-    val opened = dataFormatter.parse(innerFields("created").asInstanceOf[JsString].value)
-    val updated = innerFields.get("updated").flatMap{
+  }
+
+  def getKey(fields: Map[String, JsValue]): Option[String] =
+    getString("key", fields)
+
+  def getPriority(fields: Map[String, JsValue]): Option[String] =
+    getString("name", fields("priority").asJsObject().fields)
+
+  def getTimeEstimateInHours(fields: Map[String, JsValue]): Option[String] = {
+    fields("timeestimate") match {
+      case JsNumber(v) => Some((v.doubleValue() / 3600D).toString)
+      case JsNull => None
+      case _ => throw new IllegalArgumentException("Not supposed to end up here")
+    }
+  }
+
+  def getDate(fieldName: String, fieldsMapping: Map[String, JsValue]): Option[Date] = {
+    fieldsMapping.get(fieldName).flatMap {
       case JsString(s) => Option(dataFormatter.parse(s))
-      case JsNull      => None
+      case JsNull => None
+      case _ => throw new IllegalArgumentException("Not supposed to end up here")
     }
-    val closed = innerFields.get("resolutiondate").flatMap{
-      case JsString(s) => Option(dataFormatter.parse(s))
-      case JsNull      => None
-    }
-    val description = innerFields.get("description").flatMap{
-      case JsString(s)  => Option(s)
-      case JsNull       => None
-    }
-    val effectiveTime = closed
-                            .flatMap(v => updated.map(_.getTime - v.getTime ))
-                            .map(v => Math.abs(v/36000000))
-                            .getOrElse("-").toString
+  }
 
+  def calculateEffectiveTime(closed: Option[Date], updated: Option[Date]): Option[String] = {
+    closed
+      .flatMap(v => updated.map(_.getTime - v.getTime))
+      .map(v => Math.abs(v.toDouble / 36000000D))
+      .map(_.toString)
+  }
 
-    val list = List(key, priority, timeEstimate, effectiveTime, opened, updated.getOrElse("-").toString, closed.getOrElse("-").toString, description)
+  def writeToCSV(writer: CSVWriter, fields: Map[String, JsValue]): Unit = {
+
+    val innerFields = fields("fields").asJsObject.fields
+
+    val key: Option[String] = getKey(fields)
+    val priority: Option[String] = getPriority(innerFields)
+    val timeEstimate: Option[String] = getTimeEstimateInHours(innerFields)
+    val opened: Option[Date] = getDate("created", innerFields)
+    val updated: Option[Date] = getDate("updated", innerFields)
+    val closed: Option[Date] = getDate("resolutiondate", innerFields)
+    val description: Option[String] = getString("description", innerFields)
+    val effectiveTime: Option[String] = calculateEffectiveTime(closed, updated)
+
+    val list = List[String](key, priority, timeEstimate, effectiveTime, opened, updated, closed, description)
     writer.writeRow(list)
 
   }
+
 
 }
